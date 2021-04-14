@@ -1,0 +1,3 @@
+SET DEFINE OFF
+
+ALTER TABLE hr.jobs ADD (description VARCHAR2(20 BYTE));
