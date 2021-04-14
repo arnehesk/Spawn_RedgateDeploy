@@ -1,0 +1,218 @@
+def schemachanges = false
+def datachanges = false
+def driftdetected = false
+node {  
+		/* Begin by cleaning artifacts folder */
+	//	try {	dir ('Artifacts') { deleteDir() } }
+	//	catch (all)	{ echo "something went wrong with deletedir" }
+def CI_DB = 'jdbc:oracle:thin:@//localhost:1521/ci'
+def CI_SERVICE = 'ci'
+def CI_USER = 'HR'
+def CI_PASSWORD = 'Redgate1'
+def SCHEMA1 = 'HR'
+//def SCHEMA2 = 'HR' // in case we have more than one schema in our project
+//def SCHEMAS = "${SCHEMA1},${SCHEMA2}"
+def SCHEMAS = "${SCHEMA1}"
+def PROD_DB = 'jdbc:oracle:thin:@//localhost:1521/production'
+def PROD_USER = 'HR'
+def PROD_PASSWORD = 'Redgate1'
+def PROD_SERVICE = 'production'
+def MIGRATIONS_PATH = 'SQL'
+def RESET_MIGRATIONS_PATH = '..\\reset\\SQL' // this is the path to the source before POs have been modified used to reset prod and acceptance
+def ACCEPTANCE_DB = 'jdbc:oracle:thin:@//localhost:1521/acceptance'
+def ACCEPTANCE_USER = 'HR'
+def ACCEPTANCE_PASSWORD = 'Redgate1'
+def ACCEPTANCE_SERVICE = 'acceptance'
+def SQLCOMPARE='"C:\\Program Files\\Red Gate\\Schema Compare for Oracle 5\\sco.exe"'
+def SQLDATACOMPARE='"C:\\Program Files\\Red Gate\\Data Compare for Oracle 5\\dco.exe"'
+
+def status_schema_changes=0
+def status_data_changes=0
+
+	 stage ('Build')    {
+		checkout scm
+		 //def status = bat returnStatus: true, script:'call Tools\\CI-Build.cmd'
+		def status = bat returnStatus: true, script:"Call exit | sqlplus ${SCHEMA1}/${CI_PASSWORD}@//localhost:1521/${CI_SERVICE} @Tools/DropAllObjects.sql"
+		  	
+    	status = bat returnStatus: true, label: "snapshot", script:"${SQLCOMPARE} /i:sdwgvac /b:hdrg /forceservicename /source:db-state{${SCHEMAS}} /snp:release_state.onp"
+		archiveArtifacts allowEmptyArchive: true, artifacts:'release_state.onp'
+
+    	status = bat returnStatus: true, label: "build", script:"${SQLCOMPARE} /deploy /i:sdwgvac /source:release_state.onp{${SCHEMAS}} /target:${CI_USER}/${CI_PASSWORD}@localhost/${CI_SERVICE}{${SCHEMAS}} /forceservicename /sf:schema_creation.sql /report:all_objects.html"
+		echo "Database build status:$status"
+		if (status == 61) {
+				echo ('Database build found differences')
+		}
+		else if (status == 0) error ('No schema objects in the database') // empty schema, fail the build
+		else error("Something went wrong:$status") // Shouldn't ever get here
+			
+		status = bat returnStatus: true, script:"call Tools\\CI-Invalid-Objects.cmd"
+		echo "Invalid Objects exit code: $status" 
+		if (status == 1) {// invalid object detected
+			archiveArtifacts allowEmptyArchive: true, artifacts:'_invalid_objects.txt'
+			unstable('Invalid objects detected')
+			// error ('Invalid objects detected') 
+		}
+	 }
+	 
+  stage ('Code Analysis') {
+    status = bat returnStatus: true, script: "dotnet \"C:\\Program Files\\Red Gate\\Code Analysis for Oracle\\cao.cmd.dll\" /source:sql /warning:CreateTableStatement;INModeExplicit;UseASWithAlias /outfile:_code_analysis_results.html"
+    //status = bat returnStatus: true, script:"dotnet Tools/cao/cao.cmd.dll /source:sql /warning:CreateTableStatement;INModeExplicit;UseASWithAlias /outfile:_code_analysis_results.html"
+    echo "Status for Static Code Analysis:$status"
+    archiveArtifacts allowEmptyArchive: true, artifacts:'_code_analysis_results.html'
+    if (status != 0)
+    {
+		  // Static analysis errors found. Setting to Unstable.
+		  //unstable('Code analysis errors found')
+		   echo "Code analysis status:$status"
+    }
+  }
+stage ('Unit Tests') {
+    // See http://utplsql.org/documentation
+	  echo "Running utPlSQL unit tests"
+      def status
+      status = bat returnStatus: true, script:"Tools/utPLSQL-cli/bin/utplsql run ${SCHEMA1}/${CI_PASSWORD}@//localhost:1521/${CI_SERVICE} -f=ut_xunit_reporter -o=_test_results.xml -f=UT_COVERAGE_HTML_REPORTER -o=_code_coverage.html"
+			echo "utplsql exit code: $status"
+      if (status != 0)
+      {
+		  // Unit tests errors found. Setting to Unstable.
+		    unstable('Unit testing errors found')
+      }
+		 	status = junit '_test_results.xml'
+			echo "JUnit exit code: $status"
+		 	archiveArtifacts allowEmptyArchive: true, artifacts:'_test_results.xml'
+			echo "Archive code coverage"
+      		zip zipFile: '_code_coverage.zip', archive: true, glob: '_code_coverage.html,_code_coverage.html_assets/*'
+			  // Make sure Clean Before Checkout "Additional Behaviors" is added to the build configuration in Jenkins otherwise the zip file can't overwrite.
+	 	  	archiveArtifacts allowEmptyArchive: true, artifacts:'_code_coverage.zip', fingerprint: true 
+}
+  stage ('Deploy to QA') {
+    echo "Keep  a QA environment always up to date - ideally start with a masked version of production"
+    // Note - if additional scripts need to run on a test environment (eg, scripts to insert test data), then store these in another folder and update the flyway -locations to include all folders
+  }
+	 stage ('Approval Gate')    {
+
+		
+		def status = bat returnStatus: true, label: "sync acceptance from prod", script:"${SQLCOMPARE} /deploy /b:hdre /i:sdwgvacr /forceservicename /source:${PROD_USER}/${PROD_PASSWORD}@localhost/${PROD_SERVICE}{${SCHEMAS}} /target:${ACCEPTANCE_USER}/${ACCEPTANCE_PASSWORD}@localhost/${ACCEPTANCE_SERVICE}{${SCHEMAS}}"
+		echo "Provision acceptance: $status"
+
+		// are there schema changes? 0 no differences, 61 differences, 62 deployment failed, 63 warnings above threshold, 70 unexpected error
+		status_schema_changes = bat returnStatus: true, label: "deployment script and report", script:"${SQLCOMPARE} /b:hdre /i:sdwgvacr /forceservicename /source:release_state.onp{${SCHEMAS}} /target:${PROD_USER}/${PROD_PASSWORD}@localhost/${PROD_SERVICE}{${SCHEMAS}} /report:schema_changes.html /scriptfile:schema_update.sql"
+			// schemachanges = true // since there must be changes for warnings to be detected
+		archiveArtifacts allowEmptyArchive: true, artifacts: 'schema_update.sql, schema_changes.html'
+
+
+		
+		// are there data changes? leaving this out until we understand issues with static data comparison.
+//		def status_data_changes = bat returnStatus: true, label: "data deployment script and report", script:"${SQLDATACOMPARE} /source:db-state{${SCHEMAS}} /target:${PROD_USER}/${PROD_PASSWORD}@localhost/${PROD_SERVICE}{${SCHEMAS}} /forceservicename /reporttype:HTML /report:data_changes.html /scriptfile:data_update.sql /overwritereports"
+//		archiveArtifacts allowEmptyArchive: true, artifacts: 'data_update.sql, data_changes.html'
+//		echo "status_data_changes:$status_data_changes"
+
+		// warnings check no warnings=61, warnings=63
+		//if (status == 63) // Pause the pipeline if there are high warnings detected
+		  //{
+				// In a non-demo scenario it would be recommended to abort the build:
+				// currentBuild.result = 'ABORTED'
+				// error("Build aborted owing to detection of high warnings")
+		 // }
+		//archiveArtifacts allowEmptyArchive: true, artifacts: 'rollback.sql'
+		//timeout(time: 10, unit: 'MINUTES') { // timeout after 10 minutes to not block the agent
+		//	input 'High warnings detected for schema changes - Abort or Proceed anyway? (only schema changes will be considered for this deployment)' // Proceeding is at your own risk!
+		//}
+
+		//echo "Generate warnings report"
+		//def status_schema_changes = bat returnStatus: true, label: "warnings", script:"${SQLCOMPARE} /b:hdre /i:sdwgvac /forceservicename /source:${PROD_USER}/${PROD_PASSWORD}@localhost/${PROD_SERVICE}{${SCHEMAS}} /i:sdwgvac /source:${PROD_USER}/${PROD_PASSWORD}@localhost/${PROD_SERVICE}{${SCHEMAS}} /report:release_changes.html /scriptfile:release_update.sql > warnings.txt"
+		//archiveArtifacts allowEmptyArchive: true, artifacts: 'warnings.txt'
+
+		echo "status_schema_changes:$status_schema_changes"
+		echo "status_data_changes:$status_data_changes"
+		
+		  if (status_schema_changes == 0 && status_data_changes == 0) {
+		  // No changes to deploy so in this instance we set currentBuild.result='ABORTED' so that build status isn't marked as failed
+				currentBuild.result = 'ABORTED'
+				error ('There are no schema or static data changes to deploy: aborting')
+		  }
+
+
+		 def message = "Approve release to Production?"
+    	// wrapping in a time out so it doesn't block the agent and simply fails the build if there's no user intervention - Customize this for your needs, remove if you don't want this manual intervention step
+    	timeout(time: 30, unit: 'MINUTES') {
+      	def userInput = input(
+      	id: 'userInput', message: "$message", parameters: [
+      	[$class: 'TextParameterDefinition', defaultValue: 'I Approve the Deployment', description: 'To Proceed, type I Approve the Deployment', name: 'Review deployment artifacts before proceeding']
+     	 ])
+
+     	 // echo ("Env: "+userInput)
+      	  if (userInput.indexOf('I Approve the Deployment') == -1)
+      	  {
+       	 currentBuild.result = 'ABORTED'
+      	  error('Deployment aborted')
+      	  }
+ 
+     	}
+	 }
+/*
+	 stage ('Mask')    {
+		  def status = bat returnStatus: true, script:"call Tools\\Release-Mask-Acceptance.cmd"
+		  echo "Exit code: $status"
+		  if (status != 0) { // there is a problem
+				error("Masking failed - see log for details in %LOCALAPPDATA%-Red Gate-Logs-Data Masker for Oracle")
+		  }
+	 	  archiveArtifacts allowEmptyArchive: true, artifacts: 'DataMasker*.txt'
+	 }
+	 */
+	 
+	stage ('Deploy to Acceptance')    {
+		def status
+		echo "Acceptance status_schema_changes:$status_schema_changes"
+		echo "Acceptance status_data_changes:$status_data_changes"
+		if (status_schema_changes == 61)
+		{
+					status = bat returnStatus: true, script:"Call exit | sqlplus ${SCHEMA1}/${ACCEPTANCE_PASSWORD}@//localhost:1521/${ACCEPTANCE_SERVICE} @schema_update.sql"
+		}
+		echo "schema_update deployment status $status"
+
+
+		if (status_data_changes == 61)
+		{
+					status = bat returnStatus: true, script:"Call exit | sqlplus ${SCHEMA1}/${ACCEPTANCE_PASSWORD}@//localhost:1521/${ACCEPTANCE_SERVICE} @data_update.sql"
+		}
+		echo "data_update deployment status $status"
+
+	 }
+	 
+	 
+	//  stage ('Drift Check')    {
+	// 	  def status = bat returnStatus: true, script:"call Tools\\Release-Drift-Check.cmd"
+
+	// 	  if (status == 0) {
+	// 		  echo "No drift detected"
+	// 	  }
+	// 	  else if (status == 1) { //  Drift detected - out of process change?
+	// 			driftdetected = true
+  	// 			archiveArtifacts allowEmptyArchive: true, artifacts: 'ProductionDriftReport.html, ProductionUndoDrift.sql'
+	// 			//currentBuild.result = 'ABORTED'
+	// 			echo "Drift detected! ProductionDriftReport.html and ProductionUndoDrift generated"
+	// 	  }	
+	// }
+
+
+	stage ('Deploy to Prod')    {
+		def status
+		echo "Acceptance status_schema_changes:$status_schema_changes"
+		echo "Acceptance status_data_changes:$status_data_changes"
+		if (status_schema_changes == 61)
+		{
+					status = bat returnStatus: true, script:"Call exit | sqlplus ${SCHEMA1}/${PROD_PASSWORD}@//localhost:1521/${PROD_SERVICE} @schema_update.sql"
+		}
+		echo "schema_update deployment status $status"
+
+
+		if (status_data_changes == 61)
+		{
+					status = bat returnStatus: true, script:"Call exit | sqlplus ${SCHEMA1}/${PROD_PASSWORD}@//localhost:1521/${PROD_SERVICE} @data_update.sql"
+		}
+		echo "data_update deployment status $status"
+
+	 }
+
+}

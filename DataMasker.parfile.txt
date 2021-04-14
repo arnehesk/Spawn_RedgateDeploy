@@ -1,0 +1,4 @@
+MASKINGSET=DemoMaskingSet.DMOMaskSet
+LOGFILEDIR=C:\Users\redgate\AppData\Local\Red Gate\Logs\Data Masker for Oracle 6
+DATASETSDIR=C:\Program Files\Red Gate\Data Masker for Oracle 6\DataSets
+REPORTSDIR=.

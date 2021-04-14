@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX hr.loc_id_pkx ON hr.locations(location_id);

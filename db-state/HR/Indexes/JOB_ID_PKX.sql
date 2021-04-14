@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX hr.job_id_pkx ON hr.jobs(job_id);
