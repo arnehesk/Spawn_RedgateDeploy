@@ -1,5 +1,5 @@
 node {
-	def ProjectPath = "C:\WorkingFolders\GIT\Oracle\Spawn_RGD\Spawn_RedgateDeploy/HR.conf"
+	def ProjectPath = "C:/WorkingFolders/GIT/Oracle/Spawn_RGD/Spawn_RedgateDeploy/HR.conf"
 	def OutputDirectory = "C:/Program Files (x86)/Jenkins/jobs/Oracle DevOps (migrations)/workspace"
 	def BuildArtifactPath = "${OutputDirectory}/build.zip"
 	def ReleaseArtifactPath = "${OutputDirectory}/release.zip"
