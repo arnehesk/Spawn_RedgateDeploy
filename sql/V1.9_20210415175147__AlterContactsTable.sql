@@ -1,0 +1,3 @@
+SET DEFINE OFF
+
+ALTER TABLE hr.contacts ADD (twitterid VARCHAR2(20 BYTE));
